@@ -316,36 +316,46 @@ func processStatsFromProcs(rootFs string, cgroupPath string, rootPid int) (info.
 
 func schedulerStatsFromProcs(rootFs string, pids []int, pidMetricsCache map[int]*info.CpuSchedstat) (info.CpuSchedstat, error) {
 	for _, pid := range pids {
-		f, err := os.Open(path.Join(rootFs, "proc", strconv.Itoa(pid), "schedstat"))
+		fileInfos, err := ioutil.ReadDir(path.Join(rootFs, "proc", strconv.Itoa(pid), "task"))
 		if err != nil {
-			return info.CpuSchedstat{}, fmt.Errorf("couldn't open scheduler statistics for process %d: %v", pid, err)
+			klog.Warningf("Cannot read the task directory for PID %d: %v", pid, err)
+			continue
 		}
-		defer f.Close()
-		contents, err := ioutil.ReadAll(f)
-		if err != nil {
-			return info.CpuSchedstat{}, fmt.Errorf("couldn't read scheduler statistics for process %d: %v", pid, err)
-		}
-		rawMetrics := bytes.Split(bytes.TrimRight(contents, "\n"), []byte(" "))
-		if len(rawMetrics) != 3 {
-			return info.CpuSchedstat{}, fmt.Errorf("unexpected number of metrics in schedstat file for process %d", pid)
-		}
-		cacheEntry, ok := pidMetricsCache[pid]
-		if !ok {
-			cacheEntry = &info.CpuSchedstat{}
-			pidMetricsCache[pid] = cacheEntry
-		}
-		for i, rawMetric := range rawMetrics {
-			metric, err := strconv.ParseUint(string(rawMetric), 10, 64)
+		for _, fileInfo := range fileInfos {
+			tid, err := strconv.Atoi(fileInfo.Name())
 			if err != nil {
-				return info.CpuSchedstat{}, fmt.Errorf("parsing error while reading scheduler statistics for process: %d: %v", pid, err)
+				klog.Errorf("File %s in the task directory is not an integer: %v", fileInfo.Name(), err)
+				continue
 			}
-			switch i {
-			case 0:
-				cacheEntry.RunTime = metric
-			case 1:
-				cacheEntry.RunqueueTime = metric
-			case 2:
-				cacheEntry.RunPeriods = metric
+			contents, err := schedulerStatsFromTask(rootFs, pid, tid)
+			if err != nil {
+				klog.Errorf("Couldn't read scheduler statistics for process %d: %v", pid, err)
+				continue
+			}
+			rawMetrics := bytes.Split(bytes.TrimRight(contents, "\n"), []byte(" "))
+			if len(rawMetrics) != 3 {
+				klog.Errorf("Unexpected number of metrics in schedstat file for process %d", pid)
+				continue
+			}
+			cacheEntry, ok := pidMetricsCache[tid]
+			if !ok {
+				cacheEntry = &info.CpuSchedstat{}
+				pidMetricsCache[tid] = cacheEntry
+			}
+			for i, rawMetric := range rawMetrics {
+				metric, err := strconv.ParseUint(string(rawMetric), 10, 64)
+				if err != nil {
+					klog.Errorf("Parsing error while reading scheduler statistics for process: %d: %v", pid, err)
+					continue
+				}
+				switch i {
+				case 0:
+					cacheEntry.RunTime = metric
+				case 1:
+					cacheEntry.RunqueueTime = metric
+				case 2:
+					cacheEntry.RunPeriods = metric
+				}
 			}
 		}
 	}
@@ -356,6 +366,16 @@ func schedulerStatsFromProcs(rootFs string, pids []int, pidMetricsCache map[int]
 		schedstats.RunTime += v.RunTime
 	}
 	return schedstats, nil
+}
+
+func schedulerStatsFromTask(rootFs string, pid, tid int) ([]byte, error) {
+	klog.V(4).Infof("Checking schedstat for task %d", tid)
+	f, err := os.Open(path.Join(rootFs, "proc", strconv.Itoa(pid), "task", strconv.Itoa(tid), "schedstat"))
+	if err != nil {
+		return nil, fmt.Errorf("couldn't open scheduler statistics for process %d: %v", pid, err)
+	}
+	defer f.Close()
+	return ioutil.ReadAll(f)
 }
 
 // referencedBytesStat gets and clears referenced bytes
